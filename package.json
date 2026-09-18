@@ -1,0 +1,11 @@
+{
+  "name": "market-ingest",
+  "version": "1.0.0",
+  "dependencies": {
+    "@influxdata/influxdb-client": "^1.35.0",
+    "axios": "^1.9.0",
+    "fs": "^0.0.1-security",
+    "js-yaml": "^4.1.0",
+    "path": "^0.12.7"
+  }
+}

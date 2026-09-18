@@ -1,2 +1,8 @@
-# market-ingest-service
-supply target tickers and fetch previous 10 days trading data to start with. This data can then be analyzed locally for calculating moving day change %'s and making trade decisions
+# To build the docker image
+# docker build -t market-ingest-service .
+
+# Tag
+# docker tag market-ingest-service:latest 192.168.1.53:5000/market-ingest-service:latest
+
+# Push
+# docker push 192.168.1.53:5000/market-ingest-service:latest

@@ -1,0 +1,14 @@
+influxdb:
+  url: "http://192.168.1.53:8086" # For local runs. Change to "http://influxdb_service:8086" when using docker-compose.
+  token: "RhYDsqOQRQPJNkDxu7jfPQ14ZGteGpRPrjml2-yG_A-oD75ueW2NbHCRPA0Xv9pLOn4vHfAMw6UBJ7ToHKLekw==" # REQUIRED: Replace with your InfluxDB token
+  org: "deremworks"
+  bucket: "market_data"
+
+# Service settings
+service:
+  # Granularity in minutes (1-5). This determines how often prices are fetched.
+  granularityMinutes: 1
+  tickers:
+    - "BTC-USD"
+    - "ETH-USD"
+    - "XRP-USD"
