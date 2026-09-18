@@ -12,3 +12,24 @@ service:
     - "BTC-USD"
     - "ETH-USD"
     - "XRP-USD"
+
+# Long-horizon hourly archive.
+# The bucket above (market_data) has a 30-day retention policy, so anything older than a month is
+# gone. This writes a second, much coarser series - one point per hour, per ticker - into its own
+# bucket with NO retention, so an "all time" chart (e.g. trades plotted since January) always has a
+# price line to sit on. A year of three tickers is ~26k points, so keeping it forever is free.
+#
+# Filled from two sources, per missing hour: a rollup of our own minute ticks where they still
+# exist, falling back to Coinbase's public hourly candles for anything older (or too sparse).
+# Seed it once with:  node backfill.js --start 2026-01-01
+history:
+  enabled: true
+  bucket: "market_history"
+  measurement: "price_hourly"
+  # How far back each hourly run re-checks for gaps. Covers restarts and short outages.
+  lookbackHours: 72
+  # Default start for `node backfill.js` when no --start is passed.
+  backfillStart: "2026-01-01"
+  # Minimum fraction of the expected minute ticks an hour must contain before it is rolled up from
+  # our own data; below this we use an exchange candle instead of recording a half-empty hour.
+  minRollupCoverage: 0.5

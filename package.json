@@ -1,6 +1,10 @@
 {
   "name": "market-ingest",
   "version": "1.0.0",
+  "scripts": {
+    "start": "node marketIngestService.js",
+    "backfill": "node backfill.js"
+  },
   "dependencies": {
     "@influxdata/influxdb-client": "^1.35.0",
     "axios": "^1.9.0",

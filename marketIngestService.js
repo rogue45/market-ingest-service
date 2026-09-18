@@ -2,62 +2,22 @@
 const axios = require('axios');
 // Import the InfluxDB client library
 const { InfluxDB, Point } = require('@influxdata/influxdb-client');
-const fs = require('fs');
-const yaml = require('js-yaml');
-const path = require('path');
-
-// --- Configuration ---
-// --- Configuration Loading ---
-// Default configuration values. These will be used if not found in config.yml or environment variables.
-let config = {
-   influxdb: {
-      url: 'http://localhost:8086',
-      token: 'YOUR_INFLUXDB_OPERATOR_OR_BUCKET_TOKEN_DEFAULT', // Fallback, should be in config.yml or ENV
-      org: 'myorg_default',
-      bucket: 'mybucket_default',
-   },
-   service: {
-      granularityMinutes: 1, // Default granularity
-      tickers: ['BTC-USD', 'ETH-USD'], // Default tickers
-   },
-   coinbase: {} // Placeholder for any Coinbase specific future configs
-};
-
-try {
-   // Determine config file path. Prioritize CONFIG_PATH environment variable, then default to 'config.yml' in the script's directory.
-   const configPath = process.env.CONFIG_PATH || path.join(__dirname, 'config.yml');
-
-   // Check if the config file exists
-   if (fs.existsSync(configPath)) {
-      const configFile = fs.readFileSync(configPath, 'utf8'); // Read the YAML file
-      const loadedConfig = yaml.load(configFile); // Parse the YAML content
-
-      // Deep merge loaded config with defaults. Values from loadedConfig will overwrite defaults.
-      // This ensures that if config.yml is partially filled, defaults are used for missing parts.
-      config = {
-         influxdb: { ...config.influxdb, ...loadedConfig.influxdb },
-         service: { ...config.service, ...loadedConfig.service },
-         coinbase: { ...config.coinbase, ...loadedConfig.coinbase },
-      };
-      console.log(`[${new Date().toISOString()}] Configuration successfully loaded from ${configPath}`);
-   } else {
-      console.warn(`[${new Date().toISOString()}] Warning: Configuration file not found at ${configPath}.`);
-      console.warn(`[${new Date().toISOString()}] Using default values and/or environment variables.`);
-   }
-} catch (e) {
-   console.error(`[${new Date().toISOString()}] Error loading or parsing configuration file:`, e);
-   console.warn(`[${new Date().toISOString()}] Continuing with default values and/or environment variables.`);
-}
-
-// Service settings from config, overridden by environment variables if set
-const M_GRANULARITY = parseInt(process.env.M_GRANULARITY) || config.service.granularityMinutes;
-const M_TICKERS = process.env.M_TICKERS ? process.env.M_TICKERS.split(',') : config.service.tickers;
-
-// InfluxDB settings from config, overridden by environment variables if set
-const INFLUXDB_URL = process.env.INFLUXDB_URL || config.influxdb.url;
-const INFLUXDB_TOKEN = process.env.INFLUXDB_TOKEN || config.influxdb.token; // CRITICAL: Ensure this is set either in config.yml or as ENV
-const INFLUXDB_ORG = process.env.INFLUXDB_ORG || config.influxdb.org;
-const INFLUXDB_BUCKET = process.env.INFLUXDB_BUCKET || config.influxdb.bucket;
+// Configuration (config.yml + environment overrides) lives in one shared module so this service,
+// the hourly history job and the backfill CLI can never disagree about where they're writing.
+const {
+   M_GRANULARITY,
+   M_TICKERS,
+   INFLUXDB_URL,
+   INFLUXDB_TOKEN,
+   INFLUXDB_ORG,
+   INFLUXDB_BUCKET,
+   HISTORY_ENABLED,
+   HISTORY_BUCKET,
+   HISTORY_LOOKBACK_HOURS,
+} = require('./config');
+// Long-horizon hourly archive: market_data expires after 30 days, so an "all time" view needs a
+// second, coarser series that is never expired. See hourlyHistory.js.
+const { ensureHistoryBucket, syncRecentHours, closeHistory } = require('./hourlyHistory');
 
 // Coinbase API base URL (currently static, but could be made configurable)
 const COINBASE_API_BASE_URL = 'https://api.coinbase.com/v2/prices/';
@@ -168,6 +128,50 @@ async function fetchAndStoreAllPrices() {
 }
 
 /**
+ * Starts the hourly history job.
+ *
+ * Runs shortly after each hour closes (and once at startup, to catch up on anything missed while
+ * the service was down), re-checking a trailing window rather than only the hour that just ended -
+ * so a restart or a transient outage repairs itself without anyone running the backfill by hand.
+ * @param {string[]} tickersToWatch - An array of tickers.
+ */
+async function startHourlyHistoryJob(tickersToWatch) {
+   if (!HISTORY_ENABLED) {
+      console.log(`[${new Date().toISOString()}] Hourly history archive disabled (history.enabled=false); long-range charts will be limited to the retention window of '${INFLUXDB_BUCKET}'.`);
+      return;
+   }
+
+   const ready = await ensureHistoryBucket();
+   if (!ready) {
+      console.error(`[${new Date().toISOString()}] Hourly history archive unavailable; continuing with minute ingest only.`);
+      return;
+   }
+
+   console.log(`[${new Date().toISOString()}] Hourly history archive: bucket='${HISTORY_BUCKET}', re-checking the last ${HISTORY_LOOKBACK_HOURS}h every hour.`);
+
+   const runSync = async () => {
+      try {
+         await syncRecentHours(tickersToWatch, HISTORY_LOOKBACK_HOURS);
+      } catch (e) {
+         // Never let the history job take down minute ingest - it is a strictly additive archive.
+         console.error(`[${new Date().toISOString()}] Hourly history sync failed:`, e.message);
+      }
+   };
+
+   await runSync(); // Catch up immediately on startup.
+
+   // Fire a few minutes past the hour so the hour is fully closed and its final ticks have landed.
+   const HOUR_MS = 60 * 60 * 1000;
+   const OFFSET_MS = 2 * 60 * 1000;
+   const now = Date.now();
+   const nextRun = Math.floor(now / HOUR_MS) * HOUR_MS + HOUR_MS + OFFSET_MS;
+   setTimeout(() => {
+      runSync();
+      setInterval(runSync, HOUR_MS);
+   }, nextRun - now);
+}
+
+/**
  * Starts the service.
  * @param {number} granularityMinutes - The interval in minutes (1-5).
  * @param {string[]} tickersToWatch - An array of tickers.
@@ -197,6 +201,8 @@ function startService(granularityMinutes, tickersToWatch) {
 
    fetchAndStoreAllPrices();
    setInterval(fetchAndStoreAllPrices, intervalMilliseconds); // Subsequent fetches
+
+   startHourlyHistoryJob(tickersToWatch); // Independent cadence; deliberately not awaited.
 }
 
 // --- Service Entry Point ---
@@ -217,6 +223,7 @@ process.on('SIGINT', async () => {
    console.log(`[${new Date().toISOString()}] SIGINT received, shutting down gracefully...`);
    try {
       await writeApi.close();
+      await closeHistory();
       console.log(`[${new Date().toISOString()}] InfluxDB write API closed.`);
    } catch (e) {
       console.error(`[${new Date().toISOString()}] Error closing InfluxDB write API:`, e);
@@ -228,5 +235,6 @@ module.exports = {
    fetchSpotPrice,
    writeToInfluxDB,
    fetchAndStoreAllPrices,
+   startHourlyHistoryJob,
    startService
 };
